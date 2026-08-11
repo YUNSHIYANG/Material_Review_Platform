@@ -1,0 +1,83 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: review
+      POSTGRES_PASSWORD: review
+      POSTGRES_DB: review
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U review"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+
+  # Cloudflare Tunnel（可选）：通过域名访问本服务（无需公网 IP）。
+  # 需在 Cloudflare Zero Trust 创建 Tunnel 并把 Token 填入 .env 的 CLOUDFLARE_TUNNEL_TOKEN；
+  # 在仪表盘 Public Hostname 配置 你的域名 → http://app:8000。
+  # Token 未配置时容器保持空闲，不干扰其余服务。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      # 环境变量是强制协议的最可靠方式（命令行 --protocol 放在 run 之后会被忽略）
+      # TUNNEL_PROTOCOL=http2：走 TCP 443，规避校园网对 QUIC/UDP 7844 的封锁
+      - TUNNEL_PROTOCOL=http2
+      # 强制 IPv4，避免 cloudflared 尝试 IPv6 边缘节点（校园网 IPv6 出口不稳定）导致额外超时
+      - TUNNEL_EDGE_IP_VERSION=4
+      # 关闭自动更新，避免更新过程中断连接
+      - NO_AUTOUPDATE=true
+    # 镜像内无 shell，直接以 cloudflared 为入口；Token 由 compose 从 .env 插值注入
+    entrypoint: ["cloudflared"]
+    command: ["tunnel", "run", "--token", "$CLOUDFLARE_TUNNEL_TOKEN"]
+
+  app:
+    image: review-app:local
+    restart: unless-stopped
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+psycopg://review:review@db:5432/review
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-please_change_me_to_a_long_random_secret}
+      UPLOAD_DIR: /app/uploads
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-true}
+      MAIL_FROM: ${MAIL_FROM:-review@example.com}
+      SITE_BASE_URL: ${SITE_BASE_URL:-http://localhost:8000}
+    volumes:
+      # 上传材料直接落到宿主机 backend/uploads（与仓库目录一致，便于查看/备份）
+      - ./backend/uploads:/app/uploads
+      - logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "python -m app.seed -u ${SUPER_ADMIN_USERNAME:-superadmin} -p '${SUPER_ADMIN_PASSWORD:-Admin@1234}' --email '${SUPER_ADMIN_EMAIL:-}'
+      && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  pgdata:
+  redisdata:
+  logs:
