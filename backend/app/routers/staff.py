@@ -14,6 +14,17 @@ from ..utils import format_duration_remain, utcnow
 router = APIRouter(prefix="/api/staff", tags=["staff"])
 
 
+def _locked_submission(db: Session, submission_id: int) -> Submission | None:
+    """在分布式锁内读取事务最新行，避免复用会话旧对象。"""
+    return (
+        db.query(Submission)
+        .populate_existing()
+        .filter(Submission.id == submission_id)
+        .with_for_update()
+        .first()
+    )
+
+
 def _my_review(db: Session, submission_id: int, reviewer_id: int) -> StaffReview | None:
     return (
         db.query(StaffReview)
@@ -31,8 +42,9 @@ def todos(db: Session = Depends(get_db), reviewer: User = Depends(require_role("
         .filter(
             StaffReview.reviewer_id == reviewer.id,
             StaffReview.is_timeout.is_(False),
-            StaffReview.is_withdrawn.is_(False),
-            StaffReview.submitted_at.is_(None),
+            # A withdrawn submitted opinion is actionable again; an
+            # unsubmitted row withdrawn with the team is not.
+            (StaffReview.submitted_at.is_(None) | StaffReview.is_withdrawn.is_(True)),
             Submission.status.in_(("first_reviewing", "admin_reviewing")),
         )
         .order_by(StaffReview.personal_deadline.asc())
@@ -88,10 +100,10 @@ def review(
     submission_id: int, body: StaffReviewIn, db: Session = Depends(get_db), reviewer: User = Depends(require_role("staff"))
 ):
     with submission_lock(submission_id):
-        sub = db.get(Submission, submission_id)
+        sub = _locked_submission(db, submission_id)
         if sub is None:
             raise HTTPException(status_code=404, detail="工单不存在")
-        tasks = submit_staff_review(db, sub, reviewer, body.result, body.comment)
+        tasks = submit_staff_review(db, sub, reviewer, body.result, body.comment, body.version)
         db.commit()
     dispatch_emails(db, tasks)
     return {"message": "意见提交成功，已返回待办列表"}
@@ -102,7 +114,7 @@ def withdraw_review(
     submission_id: int, db: Session = Depends(get_db), reviewer: User = Depends(require_role("staff"))
 ):
     with submission_lock(submission_id):
-        sub = db.get(Submission, submission_id)
+        sub = _locked_submission(db, submission_id)
         if sub is None:
             raise HTTPException(status_code=404, detail="工单不存在")
         result = withdraw_staff_review(db, sub, reviewer)

@@ -44,7 +44,7 @@ review-platform/
 │   │   ├── routers/             # 四角色 API 路由
 │   │   └── seed.py              # 初始化数据库 + 超级管理员
 │   ├── alembic/                 # Alembic 迁移脚手架
-│   └── tests/                   # 29 个核心业务/API 单测
+│   └── tests/                   # 核心业务/API 单测及回归测试
 ├── frontend/                    # Vue3 前端（开发端口 5173，/api 代理到 8000）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -104,7 +104,7 @@ npm run dev        # http://localhost:5173 （/api 已代理到 8000）
 
 ```bash
 cd backend
-python -m pytest tests -v     # 29 个用例：分配算法/状态机/超时兜底/API 链路
+python -m pytest tests -v     # 分配算法/状态机/超时兜底/API 链路及回归用例
 ```
 
 ## 4. 角色与登录

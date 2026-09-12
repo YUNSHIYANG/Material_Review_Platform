@@ -39,9 +39,15 @@ def valid_opinions(submission: Submission) -> list[StaffReview]:
 
 # ---------------------------------------------------------------- 初审
 def submit_staff_review(
-    db: Session, submission: Submission, reviewer: User, result: bool, comment: str
+    db: Session,
+    submission: Submission,
+    reviewer: User,
+    result: bool,
+    comment: str,
+    version: int | None = None,
 ) -> list[dict]:
     now = utcnow()
+    check_version(submission, version)
     sr = next((s for s in submission.staff_reviews if s.reviewer_id == reviewer.id), None)
     if sr is None:
         raise HTTPException(status_code=403, detail="您未被分配该工单的初审任务")
@@ -49,16 +55,20 @@ def submit_staff_review(
         raise HTTPException(status_code=400, detail="该任务已超时，请刷新页面")
     if submission.status not in ("first_reviewing", "admin_reviewing"):
         raise HTTPException(status_code=400, detail="当前工单状态不允许提交初审意见")
+    if sr.submitted_at is not None and not sr.is_withdrawn:
+        raise HTTPException(status_code=400, detail="您已提交过初审意见，请先撤回后再修改")
     if not result and not (comment or "").strip():
         raise HTTPException(status_code=400, detail="不通过必须填写意见内容")
 
+    was_counted = sr.is_counted
     sr.result = result
     sr.comment = comment
     sr.submitted_at = now
     sr.is_withdrawn = False
     sr.is_counted = True
-    decr_pending(reviewer)
-    incr_completed(reviewer)
+    if not was_counted:
+        decr_pending(reviewer)
+        incr_completed(reviewer)
 
     tasks: list[dict] = []
     if submission.status == "first_reviewing" and len(valid_opinions(submission)) >= 2:
@@ -83,6 +93,8 @@ def withdraw_staff_review(db: Session, submission: Submission, reviewer: User) -
     sr = next((s for s in submission.staff_reviews if s.reviewer_id == reviewer.id), None)
     if sr is None or sr.submitted_at is None or sr.is_withdrawn:
         raise HTTPException(status_code=400, detail="没有可撤回的初审意见")
+    if sr.is_timeout or submission.status in ("passed", "rejected", "withdrawn", "returned"):
+        raise HTTPException(status_code=400, detail="该初审意见已进入终态或超时，无法撤回")
     if db.query(AdminReview).filter(AdminReview.submission_id == submission.id).first():
         raise HTTPException(status_code=400, detail="管理员已提交终审意见，无法撤回")
     if now > sr.personal_deadline:
@@ -92,6 +104,9 @@ def withdraw_staff_review(db: Session, submission: Submission, reviewer: User) -
     valid_before = len(valid_opinions(submission))
     if sr.is_counted:
         decr_completed(reviewer)
+        # The withdrawn opinion remains an actionable todo until it is
+        # resubmitted (or the team withdraws the whole submission).
+        incr_pending(reviewer)
     sr.is_withdrawn = True
     sr.withdrawn_at = now
     sr.is_counted = False
@@ -151,6 +166,9 @@ def withdraw_submission(db: Session, submission: Submission, team: User, version
         if sr.is_counted:
             decr_completed(db.get(User, sr.reviewer_id))
             sr.is_counted = False
+        elif sr.is_withdrawn and sr.submitted_at is not None and not sr.is_timeout:
+            # A previously withdrawn opinion had its todo restored above.
+            decr_pending(db.get(User, sr.reviewer_id))
         if not sr.is_withdrawn and not sr.is_timeout and sr.submitted_at is None:
             decr_pending(db.get(User, sr.reviewer_id))
             sr.is_withdrawn = True
@@ -282,11 +300,18 @@ def force_finalize(
 
     existing = db.query(AdminReview).filter(AdminReview.submission_id == submission.id).first()
     if existing:
-        # 管理员已提交终审：工作量回退 -1，惩罚 +1；待办在提交时已扣减，不再重复扣
-        ar_admin = db.get(User, existing.admin_id)
-        if ar_admin:
-            decr_completed(ar_admin)
-            ar_admin.system_forced_penalty += 1
+        # Roll back a normal admin result once.  A subsequent force operation
+        # updates the same unique row but must not apply another penalty.
+        if not existing.is_system_forced:
+            ar_admin = db.get(User, existing.admin_id)
+            if ar_admin:
+                decr_completed(ar_admin)
+                ar_admin.system_forced_penalty += 1
+        existing.admin_id = operator.id
+        existing.final_result = final_result
+        existing.admin_comment = comment
+        existing.reviewed_at = now
+        existing.is_system_forced = True
     else:
         # 管理员未提交终审：工作量不计入任何人；按 is_admin_pending_deducted 决定是否释放待办
         if affected_admin and not submission.is_admin_pending_deducted:
@@ -299,7 +324,7 @@ def force_finalize(
         db.add(
             AdminReview(
                 submission_id=submission.id,
-                admin_id=(affected_admin.id if affected_admin else operator.id),
+                admin_id=operator.id,
                 final_result=final_result,
                 admin_comment=comment,
                 reviewed_at=now,
@@ -369,6 +394,7 @@ def reassign_from_intervention(
     old_id = submission.assigned_admin_id
     tasks = []
     if target is not None:
+        timeout_h = get_effective_timeout(db)
         submission.cycle_count = 0
         hist.append(target.id)
         submission.reassign_history = hist
@@ -378,7 +404,15 @@ def reassign_from_intervention(
         submission.is_admin_pending_deducted = False
         submission.status = "admin_reviewing"
         incr_pending(target)
-        tasks.append(build_assignment_email(submission, target, "超管已介入重新派发本工单。"))
+        tasks.append(
+            build_assignment_email(
+                submission,
+                target,
+                "超管已介入重新派发本工单。",
+                timeout_hours=timeout_h,
+                deadline=submission.deadline_calculated_at,
+            )
+        )
     else:
         tasks = assign_admin_review(db, submission, now=now, old_admin_id=old_id)
 
@@ -432,15 +466,24 @@ def supplement_first_review(
     tasks = []
     for s in picked:
         incr_pending(s)
+        personal_deadline = add_hours(now, timeout_h)
         db.add(
             StaffReview(
                 submission_id=submission.id,
                 reviewer_id=s.id,
                 assigned_at=now,
-                personal_deadline=add_hours(now, timeout_h),
+                personal_deadline=personal_deadline,
             )
         )
-        tasks.append(build_assignment_email(submission, s, "超管已指定您补充初审本工单。"))
+        tasks.append(
+            build_assignment_email(
+                submission,
+                s,
+                "超管已指定您补充初审本工单。",
+                timeout_hours=timeout_h,
+                deadline=personal_deadline,
+            )
+        )
     submission.version += 1
     db.flush()
 
@@ -465,7 +508,9 @@ def _staff_timeout_scan(db: Session, submission: Submission, now) -> list[dict]:
     timed_out = [
         sr
         for sr in submission.staff_reviews
-        if not sr.is_timeout and not sr.is_withdrawn and sr.submitted_at is None and now > sr.personal_deadline
+        if not sr.is_timeout
+        and (sr.submitted_at is None or sr.is_withdrawn)
+        and now > sr.personal_deadline
     ]
     for sr in timed_out:
         sr.is_timeout = True
@@ -485,7 +530,10 @@ def _staff_timeout_scan(db: Session, submission: Submission, now) -> list[dict]:
 def _admin_timeout_scan(db: Session, submission: Submission, now) -> list[dict]:
     if submission.status != "admin_reviewing" or not submission.assigned_admin_id or not submission.admin_assigned_at:
         return []
-    if now <= add_hours(submission.admin_assigned_at, get_effective_timeout(db)):
+    deadline = submission.deadline_calculated_at
+    if deadline is None:
+        deadline = add_hours(submission.admin_assigned_at, get_effective_timeout(db))
+    if now <= deadline:
         return []
     return _reassign_admin_after_timeout(db, submission, now)
 
@@ -560,7 +608,16 @@ def _reassign_admin_after_timeout(db: Session, submission: Submission, now) -> l
     note = ""
     if prev:
         note = "历史派发记录说明：" + "、".join(prev) + " 曾先后收到该工单但均未及时处理。\n"
-    return [build_assignment_email(submission, new, note)]
+    timeout_h = get_effective_timeout(db)
+    return [
+        build_assignment_email(
+            submission,
+            new,
+            note,
+            timeout_hours=timeout_h,
+            deadline=submission.deadline_calculated_at,
+        )
+    ]
 
 
 def check_and_handle_timeout(db: Session, submission: Submission, now=None) -> list[dict]:

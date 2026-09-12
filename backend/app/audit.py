@@ -1,10 +1,11 @@
 """超管操作审计：统一快照结构与写审计。"""
 from sqlalchemy.orm import Session
 
-from .models import AdminAuditLog, Submission, User
+from .models import AdminAuditLog, AdminReview, Submission, User
 
 
 def build_snapshot(db: Session, submission: Submission, admin: User | None = None, staff: User | None = None) -> dict:
+    admin_review = db.query(AdminReview).filter(AdminReview.submission_id == submission.id).first()
     return {
         "submission": {
             "status": submission.status,
@@ -23,6 +24,18 @@ def build_snapshot(db: Session, submission: Submission, admin: User | None = Non
                 "system_forced_penalty": admin.system_forced_penalty,
             }
             if admin
+            else None
+        ),
+        "admin_review": (
+            {
+                "id": admin_review.id,
+                "admin_id": admin_review.admin_id,
+                "final_result": admin_review.final_result,
+                "admin_comment": admin_review.admin_comment,
+                "reviewed_at": admin_review.reviewed_at.isoformat() if admin_review.reviewed_at else None,
+                "is_system_forced": admin_review.is_system_forced,
+            }
+            if admin_review
             else None
         ),
         "staff": (
