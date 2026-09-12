@@ -1,4 +1,4 @@
-"""Cron 定时任务：每5分钟扫描超时（初审 personal_deadline / 终审 admin_assigned_at+72h）、
+"""Cron 定时任务：每5分钟扫描超时（初审 personal_deadline / 终审持久化 deadline_calculated_at）、
 邮件失败重试、每日 timeout_count 衰减。使用 Redis 分布式锁防止多实例重复执行。"""
 import logging
 
@@ -18,15 +18,12 @@ logger = logging.getLogger("cron")
 
 def scan_timeouts(db: Session) -> None:
     now = utcnow()
-    timeout_h = get_effective_timeout(db)
-
     # ---- 初审超时：staff_reviews.personal_deadline ----
     overdue = (
         db.query(StaffReview)
         .filter(
             StaffReview.is_timeout.is_(False),
-            StaffReview.is_withdrawn.is_(False),
-            StaffReview.submitted_at.is_(None),
+            (StaffReview.submitted_at.is_(None) | StaffReview.is_withdrawn.is_(True)),
             StaffReview.personal_deadline < now,
         )
         .all()
@@ -47,7 +44,7 @@ def scan_timeouts(db: Session) -> None:
             db.rollback()
             logger.exception("初审超时处理失败 submission=%s: %s", sid, e)
 
-    # ---- 终审超时：admin_assigned_at + 72h ----
+    # ---- 终审超时：使用派发时持久化的工单截止快照 ----
     reviewing = (
         db.query(Submission)
         .filter(
@@ -58,7 +55,8 @@ def scan_timeouts(db: Session) -> None:
         .all()
     )
     for sub in reviewing:
-        if now <= add_hours(sub.admin_assigned_at, timeout_h):
+        deadline = sub.deadline_calculated_at or add_hours(sub.admin_assigned_at, get_effective_timeout(db))
+        if now <= deadline:
             continue
         try:
             with submission_lock(sub.id):
@@ -66,7 +64,10 @@ def scan_timeouts(db: Session) -> None:
                 if (
                     sub2.status == "admin_reviewing"
                     and sub2.assigned_admin_id
-                    and now > add_hours(sub2.admin_assigned_at, timeout_h)
+                    and now > (
+                        sub2.deadline_calculated_at
+                        or add_hours(sub2.admin_assigned_at, get_effective_timeout(db))
+                    )
                 ):
                     tasks = _reassign_admin_after_timeout(db, sub2, now)
                     sub2.version += 1

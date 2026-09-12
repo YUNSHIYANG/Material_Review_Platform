@@ -127,15 +127,16 @@ def assign_first_review(db: Session, submission: Submission, team: User) -> list
     tasks = []
     for s in picks:
         incr_pending(s)
+        personal_deadline = add_hours(now, timeout_h)
         db.add(
             StaffReview(
                 submission_id=submission.id,
                 reviewer_id=s.id,
                 assigned_at=now,
-                personal_deadline=add_hours(now, timeout_h),
+                personal_deadline=personal_deadline,
             )
         )
-        tasks.append(build_assignment_email(submission, s))
+        tasks.append(build_assignment_email(submission, s, timeout_hours=timeout_h, deadline=personal_deadline))
     return tasks
 
 
@@ -182,7 +183,15 @@ def assign_admin_review(db: Session, submission: Submission, now=None, old_admin
         ]
         if prev_names:
             note = "历史派发记录说明：" + "、".join(prev_names) + " 曾先后收到该工单但均未及时处理。\n"
-    return [build_assignment_email(submission, new, note)]
+    return [
+        build_assignment_email(
+            submission,
+            new,
+            note,
+            timeout_hours=timeout_h,
+            deadline=submission.deadline_calculated_at,
+        )
+    ]
 
 
 def recommend_supplement_staff(db: Session, team: User, n: int = 2) -> list[int]:

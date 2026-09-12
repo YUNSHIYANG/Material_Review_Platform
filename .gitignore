@@ -1,0 +1,33 @@
+# Local settings and credentials (keep the documented template).
+.env
+.env.*
+!.env.example
+
+# Python / frontend dependencies and generated output.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+node_modules/
+dist/
+
+# User uploads, local databases, backups and test scratch data.
+uploads/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.dump
+logs/
+*.log
+scratch/
+
+# Editor / operating-system state.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

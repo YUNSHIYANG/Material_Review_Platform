@@ -21,13 +21,26 @@ RETRY_MAX_ATTEMPTS = 4  # 首次 + 最多3次重试
 
 
 # ---------------------------------------------------------------- 模板
-def build_assignment_email(submission: Submission, recipient_user: User, history_note: str = "") -> dict:
+def build_assignment_email(
+    submission: Submission,
+    recipient_user: User,
+    history_note: str = "",
+    *,
+    timeout_hours: int | float | None = None,
+    deadline: datetime | None = None,
+) -> dict:
     team = submission.team
     date_str = datetime.now(CST_TZ).strftime("%Y年%m月%d日%H:%M")
+    timeout_text = timeout_hours if timeout_hours is not None else settings.timeout_hours
+    deadline_text = (
+        f"（截止时间：{deadline.replace(tzinfo=timezone.utc).astimezone(CST_TZ).strftime('%Y年%m月%d日%H:%M')}）"
+        if deadline is not None
+        else ""
+    )
     body = (
         "您好，根据安排，现交给你一份材料审核任务"
         f"（工单#{submission.id}，团队【{team.real_name}】第{submission.submit_round}次提交），"
-        f"请于{settings.timeout_hours}小时内在系统上完成审核，有不懂的地方请随时与负责人沟通。\n"
+        f"请于{timeout_text}小时内在系统上完成审核{deadline_text}，有不懂的地方请随时与负责人沟通。\n"
         f"{history_note}\n{date_str}"
     )
     return {

@@ -1,0 +1,30 @@
+# ---- 元数据 ----
+.git
+.gitignore
+.dockerignore
+README.md
+产品设计文档.md
+
+# ---- 敏感配置 ----
+.env
+
+# ---- 依赖与构建产物 ----
+**/node_modules/
+frontend/dist/
+backend/static/
+
+# ---- Python 缓存 ----
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+
+# ---- 运行数据（禁止打进镜像） ----
+backend/uploads/
+backend/test_uploads/
+backend/dev.db
+测试材料/
+logs/
+*.log
+*.tar
+*.dump

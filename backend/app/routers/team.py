@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..assignment import ACTIVE_STATUSES, assign_admin_review, assign_first_review
 from ..config import get_settings
+from ..config_store import get_effective_timeout
 from ..database import get_db
 from ..deps import get_current_user, require_role
 from ..email_service import dispatch_emails
@@ -122,14 +123,14 @@ def create_submission(
 
     # 关联追溯：最近一条“未通过/已打回”的根工单（不考虑时间与次数）
     parent_id = None
-    last_failed = (
+    latest = (
         db.query(Submission)
-        .filter(Submission.team_id == team.id, Submission.status.in_(("rejected", "returned")))
-        .order_by(Submission.created_at.desc())
+        .filter(Submission.team_id == team.id)
+        .order_by(Submission.created_at.desc(), Submission.id.desc())
         .first()
     )
-    if last_failed:
-        root = last_failed
+    if latest and latest.status in ("rejected", "returned"):
+        root = latest
         while root.parent_submission_id:
             root = db.get(Submission, root.parent_submission_id)
         parent_id = root.id
@@ -170,7 +171,7 @@ def create_submission(
         file_path=rel_path,
         remark=remark or None,
         status="pending",
-        deadline_calculated_at=add_hours(now, settings.timeout_hours),
+        deadline_calculated_at=add_hours(now, get_effective_timeout(db)),
     )
     db.add(sub)
     db.flush()
